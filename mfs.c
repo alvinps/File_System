@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 
 #define WHITESPACE " \t\n"      // We want to split our command line up into tokens
                                 // so we need to define what delimits our tokens.
@@ -61,6 +62,7 @@ typedef struct Directory_entry
 {
 	uint8_t valid;
 	char name[FILENAME_LEN];
+	char timestamp[30];
 	uint32_t inode;
 }Directory_Entry;
 
@@ -77,7 +79,8 @@ struct Inode * inodes_list;
 uint8_t * free_block_list;
 uint8_t * free_inode_list;
 uint8_t file_count;
-
+time_t timestamp;
+	
 
 void FreeINodeList_Init()
 {
@@ -104,6 +107,7 @@ void Dir_Init()
 	{
 		dir[i].valid = 0;
 		memset(dir[i].name,0,32);
+		memset(dir[i].timestamp,0,30);
 		dir[i].inode = -1;
 	}
 }
@@ -139,7 +143,10 @@ int disk_size()
 	for(i=0;i<128;i++)
 	{
 
-
+		if(dir[i].valid != 0)
+		{
+			size += inodes_list[dir[i].inode].size ; 
+		}
 	}
 
 return size;
@@ -152,10 +159,10 @@ int find_free_dir()
 	int val =-1;
 	for(i =0 ; i<128;i++)
 	{
-		if(dir[i].valid == -1)
-		{
+		if(dir[i].valid == 0)
+		{			
 			val = i;
-			dir[i].valid = 0;
+			dir[i].valid = 1;
 			break;
 		}		
 	}
@@ -175,6 +182,7 @@ int find_free_inode()
 			break;
 		}		
 	}
+
 	return val;
 }
 
@@ -198,7 +206,7 @@ void create_fs(char* fsname)
 {
 	if(fsname==NULL) 
 	{
-		printf("msf> createfs: File not found\n");
+		printf("mfs> createfs: File not found\n");
 		return;
 	}
 	memset(blocks, 0 , BLOCK_NUM* BLOCK_SIZE);
@@ -215,7 +223,7 @@ void open(char* fsname)
 	file_d = fopen(fsname,"r+");
 	if(file_d==NULL) 
 	{
-		printf("mfs>open: File not found");
+		printf("mfs> open: File not found\n");
 		return;
 	}
 	fread(blocks, BLOCK_SIZE,BLOCK_NUM,file_d);
@@ -223,6 +231,10 @@ void open(char* fsname)
 
 void fs_close( ) 
 {
+	if(file_d == NULL)
+	{
+		printf("mfs> close error: No open fs to close.");
+	}
 	rewind(file_d);
 	fwrite(blocks, BLOCK_SIZE,BLOCK_NUM,file_d);
 	fclose(file_d);
@@ -234,42 +246,45 @@ void put(char* filename)
 	
 	if(strlen(filename)>32)
 	{
-		printf("msf> put error: File name too long.\n");
+		printf("mfs> put error: File name too long.\n");
 		return;
 	}
 	int status;
 	struct stat buffer;
-
 	status = stat(filename, &buffer);
 	if(status == -1 )
 	{
-		printf("msf> put error: File not found.\n");
+		printf("mfs> put error: File not found.\n");
 	}
 	/* condition for checking disk min req */
-	else if (buffer.st_size> disk_size())
+	else if (buffer.st_size> (BLOCK_SIZE* (BLOCK_NUM-8) - disk_size()))
 	{
-		printf("msf> put error: Not enough disk space.\n");
+		printf("mfs> put error: Not enough disk space.\n");
 	}
 	else if (buffer.st_size> BLOCK_FOR_A_FILE*BLOCK_SIZE)
 	{
-		printf("msf> put error: File too big.\n");
+		printf("mfs> put error: File too big.\n");
 	}
 	
 	else
-	{
- 
+	{ 
 		 // Open the input file read-only 
     FILE *ifp = fopen ( filename, "r" ); 
-    printf("Reading %d bytes from %s\n", (int) buffer.st_size, filename );
- 
     // Save off the size of the input file since we'll use it in a couple of places and 
     // also initialize our index variables to zero. 
     int filenum = find_free_dir();
     dir[filenum].inode = find_free_inode();
     int copy_size   = buffer.st_size;
     strcpy(dir[filenum].name,filename);
+    timestamp = time(NULL);
+	strcpy(dir[filenum].timestamp,asctime( localtime(&timestamp) ));
+    dir[filenum].timestamp[strlen(dir[filenum].timestamp)-1] = '\0';
+
+
    	inodes_list[dir[filenum].inode].size = copy_size;
-    
+	
+  	//inodes_list[dir[filenum].inode].attributes = 3;
+	
     int block_count = 0;
     // We want to copy and write in chunks of BLOCK_SIZE. So to do this 
     // we are going to use fseek to move along our file stream in chunks of BLOCK_SIZE.
@@ -288,7 +303,7 @@ void put(char* filename)
     while( copy_size > 0 )
     {
     	int block_index = find_free_block();
-
+    
     	inodes_list[filenum].blocks[block_count]= block_index;
       // Index into the input file by offset number of bytes.  Initially offset is set to
       // zero so we copy BLOCK_SIZE number of bytes from the front of the file.  We 
@@ -305,7 +320,7 @@ void put(char* filename)
       // It means we've reached the end of our input file.
       if( bytes == 0 && !feof( ifp ) )
       {
-        printf("An error occured reading from the input file.\n");
+        printf("mfs> An error occured reading from the input file.\n");
         return;
       }
 
@@ -318,7 +333,7 @@ void put(char* filename)
       // Increase the offset into our input file by BLOCK_SIZE.  This will allow
       // the fseek at the top of the loop to position us to the correct spot.
       offset    += BLOCK_SIZE;
-
+    
       // Increment the index into the block array 
       block_count ++;
     }
@@ -328,8 +343,6 @@ void put(char* filename)
  
 	}
 
-
-
 return;
 }
 
@@ -338,55 +351,96 @@ void list(char* data)
 {
 
 	int i ;
+	int count =0;
+
 	for(i=0;i<128;i++)
 	{
-		if(dir[i].valid != -1)
+		if(dir[i].valid != 0)
 	{
-		if(inodes_list[dir[i].inode].attributes ==3 )
+		if((inodes_list[dir[i].inode].attributes == (int)'h') ||
+		 (inodes_list[dir[i].inode].attributes == ((int)'h')+((int)'r')) )
 		{
 			if(data[1]=='h'||data[1]=='H')
 			{
 				printf("Hidden Filename is %s\n",dir[i].name );
+				count++;
 			}
 		}
 		else
 		{
-		printf("Filename is %s\n",dir[i].name );
+		printf("%8d%27s%15s\n", inodes_list[dir[i].inode].size , dir[i].timestamp ,dir[i].name);
+		count++;
 		}
 	}
 }
+if(count ==0)
+{
+	printf("mfs> list: No files found\n");
+}
+
 }
 
 void del(char* filename)
 {
 
 
-
 }
 
 void df()
 {
-	printf("Disk size is %d\n", disk_size() );
+	printf("%d bytes free.\n", BLOCK_SIZE* (BLOCK_NUM - 8) - disk_size() );
 }
 
 
+int file_searcher(char* filename)
+{
+	int i;
+	for(i=0;i<128; i++)
+	{
+		if(dir[i].valid!=0)
+		{
+			if(strcmp(filename,dir[i].name)==0)
+			{
+				return i;
+			}
+		}
+	}
+return -1;
+}
 
 void get(char* filename, char* newfilename)
 {
 
+	if(strlen(newfilename)>32)
+	{
+		printf("mfs> get error: New file name too long.\n");
+		return;
+	}
+	
+    int block_count = 0;
+    int filenum = file_searcher(filename);
+    if(filenum ==-1){
+    	printf("mfs> get error: File not found\n");
+    	return;
+    	
+    }
 	FILE *ofp;
-    ofp = fopen(filename, "w");
-
+	if(newfilename == NULL)
+	{
+		ofp = fopen(filename, "w");
+	}
+	else
+	{
+		ofp = fopen(newfilename, "w");
+	}
     if( ofp == NULL )
     {
-      printf("Could not open output file: %s\n", filename );
-      perror("Opening output file returned");
+      printf("mfs> Could not open output file: %s\n", filename );
       return ;
     }
 
     // Initialize our offsets and pointers just we did above when reading from the file.
-    int block_count = 0;
-    int filenum = 0;
+
     int copy_size   = inodes_list[dir[filenum].inode].size;
     int offset      = 0;
 
@@ -435,20 +489,42 @@ void get(char* filename, char* newfilename)
 
 void attrib(char* attributes, char* filename)
 {
+	  int filenum = file_searcher(filename);
+    if(filenum ==-1){
+    	printf("mfs> attrib: File not found\n");
+    	return;
+  	}
+  	if(attributes[0] =='+')
+  	{
+
+
+  		  	inodes_list[dir[filenum].inode].attributes += (int) attributes[1]; 
+  	}
+  	else if(attributes[0]=='-')
+  	{
+  		inodes_list[dir[filenum].inode].attributes -= (int) attributes[1]; 
+  	}
+  	else
+  	{
+  		printf("mfs> attrib: Unrecognized operation.\n");
+  		return;
+  	}
 
 
 }
 
 int main()
 {
+	
 	dir = (Directory_Entry*) &blocks[0];
 	
-	inodes_list = (Inode *) &blocks[6];
-	free_block_list = (uint8_t*) &blocks[4];
-	free_inode_list = (uint8_t*) &blocks[5];
+	inodes_list = (Inode *) &blocks[9];
+	free_block_list = (uint8_t*) &blocks[7];
+	free_inode_list = (uint8_t*) &blocks[8];
  
-
 	initialized();
+
+	int i;
 
   char * cmd_str = (char*) malloc( MAX_COMMAND_SIZE );
 
@@ -498,43 +574,49 @@ int main()
     if(strcmp(token[0],"quit")==0 || strcmp(token[0],"exit")==0 )
     {
    	    free( working_root );
+   	    if(file_d!= NULL) fs_close();
     	exit(0);
     }
-    else if(strcmp(token[0],"put")==0) 		put(token[1]);
-
-    else if(strcmp(token[0],"get")==0) 		get(token[1],token[2]);
-
-    else if(strcmp(token[0],"del")==0)		del(token[1]);
-
-    else if(strcmp(token[0],"list")==0)		list(token[1]);
-
-    else if(strcmp(token[0],"df")==0)		df();
-
-    else if(strcmp(token[0],"open")==0)		open(token[1]);
-
-    else if(strcmp(token[0],"close")==0)	fs_close();
-
-    else if(strcmp(token[0],"createfs")==0)	create_fs(token[1]);
-
-    else if(strcmp(token[0],"attrib")==0)	attrib(token[1], token[2]);
-
-    else if(strcmp(token[0],"testdisplay")==0)
+    else if(strcmp(token[0],"put")==0)
     {
-    	printf("Datas read %d %d %d \n",inodes_list[4].blocks[0],inodes_list[4].blocks[1],inodes_list[4].blocks[2] );
+    	put(token[1]);
     }
-    else if(strcmp(token[0],"testwrite")==0)
+    else if(strcmp(token[0],"get")==0)
     {
-    	inodes_list[4].blocks[0]= 420;
-    	inodes_list[4].blocks[1]= 240;    		
+    	get(token[1],token[2]);
     }
-    else if(strcmp(token[0],"testwrite1")==0)
+    else if(strcmp(token[0],"del")==0)
     {
-    	inodes_list[4].blocks[0]= 16;
-    	inodes_list[4].blocks[1]= 16;    		
+    	del(token[1]);
     }
-    else									printf("mfs> Command not found. Try Again!!!\n");
-   
-
+    else if(strcmp(token[0],"list")==0)
+    {
+    	list(token[1]);
+    }
+    else if(strcmp(token[0],"df")==0)
+    {
+    	df();
+    }
+    else if(strcmp(token[0],"open")==0)
+    {
+    	open(token[1]);
+    }
+    else if(strcmp(token[0],"close")==0)	
+    {
+    	fs_close();
+    }
+    else if(strcmp(token[0],"createfs")==0)	
+    {
+    	create_fs(token[1]);
+    }
+    else if(strcmp(token[0],"attrib")==0)
+    {
+    	attrib(token[1], token[2]);
+    }
+    else
+    {
+   		printf("mfs> Command not found. Try Again!!!\n");
+    }	
     free( working_root );
   }
   return 0;
